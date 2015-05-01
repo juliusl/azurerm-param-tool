@@ -1,3 +1,4 @@
 AzureRMParamTool/bin/
 AzureRMParamTool/obj/
 packages/
+*.suo
