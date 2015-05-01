@@ -2,101 +2,117 @@
 using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
-using System.Text;
 using System.Text.RegularExpressions;
-using System.Threading.Tasks;
+using static System.DateTime;
+using static System.Environment;
+using static System.IO.File;
+using static System.IO.Path;
 
 namespace AzureRMParamTool
 {
     class Program
     {
-        const string MessageFormat = "AzureRMParamTool: {0}";
-
         static void Main(string[] args)
         {
 #if DEBUG
             args = new string[] { "/Param:adminUserName", "/Val:test_2" };
 #endif
-            // Found from http://stackoverflow.com/a/5955585 user- https://stackoverflow.com/users/261653/daniel
-            Regex cmdRegEx = new Regex(@"/(?<name>.+?):(?<val>.+)");
-            Regex cmdSwitchRegEx = new Regex(@"/(?<name>.+)");
-
-            Dictionary<string, string> cmdArgs = new Dictionary<string, string>();
-            foreach (string s in args)
+            try
             {
-                Match m = cmdRegEx.Match(s);
-                Match mSwitch = cmdSwitchRegEx.Match(s);
-                if (m.Success)
+                // Grab the command line arguments
+                // Found from http://stackoverflow.com/a/5955585 user- https://stackoverflow.com/users/261653/daniel
+                Regex cmdRegEx = new Regex(@"/(?<name>.+?):(?<val>.+)");
+                Regex cmdSwitchRegEx = new Regex(@"/(?<name>.+)");
+
+                Dictionary<string, string> cmdArgs = new Dictionary<string, string>();
+                foreach (string s in args)
                 {
-                    cmdArgs.Add(m.Groups[1].Value, m.Groups[2].Value);
+                    Match m = cmdRegEx.Match(s);
+                    Match mSwitch = cmdSwitchRegEx.Match(s);
+                    if (m.Success)
+                    {
+                        cmdArgs.Add(m.Groups[1].Value, m.Groups[2].Value);
+                    }
+                    else if (mSwitch.Success)
+                    {
+                        cmdArgs.Add(mSwitch.Groups[1].Value, "");
+                    }
                 }
-                else if (mSwitch.Success)
+
+                // Load the override file if the override file exists
+                if (Exists(Combine(CurrentDirectory, "override.param.json")))
                 {
-                    cmdArgs.Add(mSwitch.Groups[1].Value, "");
+                    WriteToConsole("override.param.json file found, switching files.");
+                    cmdArgs["File"] = Combine(CurrentDirectory, "override.param.json");
                 }
-            }
 
-            if (File.Exists(Path.Combine(Environment.CurrentDirectory, "override.param.json")))
+                // Deserialize the params file
+                var fileContent = ReadAllText(cmdArgs["File"]);
+                var paramObject = JsonConvert.DeserializeObject<Dictionary<string, object>>(fileContent);
+
+                // Validate the given file is a Azure RM parameters file
+                if (!paramObject.ContainsKey("$schema"))
+                {
+                    WriteToConsole("Missing $schema property. File is an invalid AzureRM paramters file");
+                    return;
+                }
+                
+                var schema = (string)paramObject["$schema"];
+                if (!schema.Contains("deploymentParameters"))
+                {
+                    WriteToConsole("Schema doesn't contain 'deploymentParameters'. This file must not be an Azure RM deployment parameters file");
+                    return;
+                }
+
+                // Grab the parameters block
+                JObject parameters = (JObject)paramObject["parameters"];
+
+                // Evaluate if the user just want's to list properties and return
+                if (cmdArgs.ContainsKey("List"))
+                {
+                    WriteResultToConsole(parameters.Children().Select(t => t.ToString()).ToArray());
+                    return;
+                }
+
+                // Validate that the user has the Param and Val keys
+                if (!cmdArgs.ContainsKey("Param") &&
+                    !cmdArgs.ContainsKey("Val"))
+                {
+                    WriteToConsole("/Param:<parameter name> and /Val:<value> required");
+                    return;
+                }
+
+                // Set the parameter           
+                parameters[cmdArgs["Param"]]["value"] = cmdArgs["Val"];
+                if (cmdArgs.ContainsKey("Verbose")) {
+                    WriteToConsole("Parameter set:");
+                    WriteResultToConsole(parameters.Children().Select(t => t.ToString()).ToArray());
+                }
+
+                // Apply the changes
+                paramObject["parameters"] = parameters;
+
+                // Write to the file
+                var changedContent = JsonConvert.SerializeObject(paramObject, Formatting.Indented);
+                WriteAllText(cmdArgs["File"], changedContent);
+            }
+            catch (Exception e)
             {
-                cmdArgs["File"] = Path.Combine(Environment.CurrentDirectory, "override.param.json");
-            }
-
-            var fileContent = File.ReadAllText(cmdArgs["File"]);
-
-            Dictionary<string, object> paramObject = JsonConvert.DeserializeObject<Dictionary<string, object>>(fileContent);
-
-            // Validate the given file is a Azure RM parameters file
-            if (!paramObject.ContainsKey("$schema"))
-            {
-                WriteToConsole("Missing $schema property. File is an invalid AzureRM paramters file");
-                return;
-            }
-
-            var schema = (string)paramObject["$schema"];
-            if (!schema.Contains("deploymentParameters"))
-            {
-                WriteToConsole("Schema doesn't contain 'deploymentParameters'. This file must not be an Azure RM deployment parameters file");
-            }
-
-            JObject parameters = (JObject)paramObject["parameters"];
-
-            // Evaluate if the user just want's to list properties and return
-            if (cmdArgs.ContainsKey("List"))
-            {
-                WriteResultToConsole(parameters.Children().Select(t => t.ToString()).ToArray());
-                return;
-            }
-
-            // Validate that the user has the Param and Val keys
-            if (!cmdArgs.ContainsKey("Param") && 
-                !cmdArgs.ContainsKey("Val"))
-            {
-                WriteToConsole("/Param:<parameter name> and /Val:<value> required");
-                return;
-            }
- 
-            // Set the parameter           
-            parameters[cmdArgs["Param"]]["value"] = cmdArgs["Val"];
-            WriteResultToConsole(parameters.Children().Select(t => t.ToString()).ToArray());
-            paramObject["parameters"] = parameters;
-            
-            // Write to the file
-            var changedContent = JsonConvert.SerializeObject(paramObject);
-            File.WriteAllText(cmdArgs["File"], changedContent);
+                WriteToConsole($"There was an issue - Exception Details: {e}");
+            }            
         }
 
         static void WriteToConsole(string message)
         {
-            Console.Out.WriteLine(string.Format(MessageFormat, message));
+            Console.Out.WriteLine($"[{Now}] AzureRMParamTool: { message }");
         }
 
         static void WriteResultToConsole(string[] messages)
         {
             foreach (var message in messages)
             {
-                Console.Out.WriteLine(message);
+                WriteToConsole(message);
             }
         }
     }
